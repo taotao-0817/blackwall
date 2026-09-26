@@ -1,0 +1,4 @@
+# 仅 HTTP 网关（python server.py）需要这些依赖；
+# 核心引擎 / 演示 / 风控报告 均为零第三方依赖（纯标准库）。
+fastapi>=0.110
+uvicorn>=0.29

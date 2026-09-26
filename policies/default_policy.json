@@ -1,0 +1,114 @@
+{
+  "_comment": "黑墙系统 BlackWall V1.0 策略包 —— 企业可编辑的监管规则。匹配语义见 blackwall/policy_engine.py 顶部文档。effect: allow/sanitize/approval/deny；多规则命中取最严格者，风险分叠加。",
+  "name": "小型企业默认策略包",
+  "version": "1.0",
+  "default_effect": "allow",
+  "rules": [
+    {
+      "_comment": "示例：不可逆的删除操作一律转人工审批（挂起 → 安全员点通过/驳回）",
+      "id": "APPROVAL-DELETE-ANY",
+      "description": "数据删除属不可逆高危操作，一律转人工审批",
+      "effect": "approval",
+      "risk": 20,
+      "reason": "数据删除操作已挂起，转人工审批（不可逆操作需要人把关）",
+      "match": {
+        "phases": ["tool"],
+        "tools": ["delete_records"]
+      }
+    },
+    {
+      "id": "DENY-EXPORT-ALL-CUSTOMERS",
+      "description": "禁止全量/批量拉取客户个人信息",
+      "effect": "deny",
+      "risk": 35,
+      "reason": "检测到全量导出客户数据（含个人信息），违反最小必要原则，已阻断",
+      "match": {
+        "phases": ["tool"],
+        "tools": ["query_customer_db"],
+        "arg_regex": {
+          "sql": ["select\\s+\\*", "limit\\s+\\d{3,}", "(全部|所有)客户"]
+        }
+      }
+    },
+    {
+      "id": "DENY-EXTERNAL-PRIVATE-MAIL",
+      "description": "禁止向外部私人邮箱域外发企业数据（数据外泄主通道）",
+      "effect": "deny",
+      "risk": 30,
+      "reason": "收件域为外部私人邮箱，禁止外发企业数据（数据外泄风险），已阻断",
+      "match": {
+        "phases": ["tool"],
+        "tools": ["send_email"],
+        "arg_regex": {
+          "to": ["@(gmail|qq|163|126|sina|outlook|hotmail|foxmail|yahoo)\\.(com|cn|net)"]
+        }
+      }
+    },
+    {
+      "_comment": "示例：公司域白名单之外需要人工确认（arg_regex_not 的用法）",
+      "id": "APPROVAL-EXTERNAL-MAIL",
+      "description": "向公司域之外发送邮件需人工确认",
+      "effect": "approval",
+      "risk": 15,
+      "reason": "收件人不在公司域白名单内，已挂起转人工确认",
+      "match": {
+        "phases": ["tool"],
+        "tools": ["send_email"],
+        "arg_regex_not": {
+          "to": ["@company\\.com", "@hsc\\.com\\.cn"]
+        }
+      }
+    },
+    {
+      "id": "DENY-SENSITIVE-RESOURCE",
+      "description": "薪资表 / 系统启动项 / 系统目录等受控资源不可触碰",
+      "effect": "deny",
+      "risk": 35,
+      "reason": "访问目标属于受控资源（薪资文件 / 系统启动项 / 系统目录），已阻断",
+      "match": {
+        "phases": ["tool"],
+        "tools": ["read_file", "write_file"],
+        "resource_globs": [
+          "*salaries*", "*payroll*", "*薪资*", "*工资*",
+          "*startup*", "*启动*",
+          "c:/windows/*", "c:\\windows\\*", "*/etc/*"
+        ]
+      }
+    },
+    {
+      "id": "DENY-DANGEROUS-COMMAND",
+      "description": "破坏性 / 危险 shell 命令黑名单",
+      "effect": "deny",
+      "risk": 40,
+      "reason": "命令命中破坏性操作指纹，已阻断（防止不可逆系统破坏）",
+      "match": {
+        "phases": ["tool"],
+        "tools": ["run_shell"],
+        "arg_regex": {
+          "command": [
+            "rm\\s+-rf", "rm\\s+-fr", "\\bformat\\s+[a-z]:",
+            "del\\s+/[fs]", "del\\s+/[sf]", "\\bshutdown\\b", "\\bdiskpart\\b",
+            "\\bmkfs\\b", ">\\s*/dev/sd", "chmod\\s+-R\\s+777\\s+/",
+            "curl[^|]*\\|\\s*(bash|sh)", "wget[^|]*\\|\\s*(bash|sh)"
+          ]
+        }
+      }
+    },
+    {
+      "_comment": "示例：Agent 尝试修改/绕过自身的监管配置——内容级正则拦截",
+      "id": "DENY-SELF-MODIFY",
+      "description": "禁止 Agent 修改安全配置 / 绕过监管的意图",
+      "effect": "deny",
+      "risk": 45,
+      "reason": "检测到修改安全配置 / 绕过监管的意图，已阻断",
+      "match": {
+        "phases": ["tool", "input"],
+        "content_regex": [
+          "(关闭|禁用|绕过|删除)[^。\\n]{0,6}(沙盒|安全|审计|监管|策略|过滤)",
+          "disable[^\\n]{0,12}(sandbox|guard|audit|security|policy)",
+          "bypass[^\\n]{0,12}(guard|sandbox|security|filter|audit)"
+        ]
+      }
+    }
+  ]
+}

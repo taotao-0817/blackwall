@@ -1,0 +1,14 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ---- 运行数据（审计库 / 业务库 / 外发台账 / 沙盒工作区）----
+data/
+
+# ---- 生成物（由 python demo.py / build_dashboard.py 生成）----
+dashboard/index.html
+
+# ---- 本地草稿（不进仓库）----
+roadmap.html
+*.log
