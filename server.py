@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-黑墙系统 BlackWall V1.1 · HTTP 网关
+黑墙系统 BlackWall V1.2 · HTTP 网关
 ====================================
 
 让任何语言、任何形态的 AI 程序**零改造**接入黑墙：把"改代码"变成"改地址"。
@@ -130,7 +130,7 @@ def gateway_approval(action, decision) -> tuple[str, str]:
 # FastAPI 应用
 # ==========================================================================
 
-app = FastAPI(title="黑墙系统 BlackWall V1.1 · 网关", version="1.1.0",
+app = FastAPI(title="黑墙系统 BlackWall V1.2 · 网关", version="1.2.0",
               description="企业 AI Agent 安全限制与监管隔离网关")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
                    allow_headers=["*"])
@@ -292,7 +292,7 @@ def stats(_: None = Depends(require_token)):
 def main() -> None:
     global BOX, APPROVAL_WAIT
 
-    parser = argparse.ArgumentParser(description="黑墙系统 BlackWall V1.1 · HTTP 网关")
+    parser = argparse.ArgumentParser(description="黑墙系统 BlackWall V1.2 · HTTP 网关")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--token", default="blackwall-demo-token",
@@ -313,7 +313,7 @@ def main() -> None:
     BOX = build_box(reset=args.reset, approval_handler=handler)
 
     print("═" * 68)
-    print("  黑墙系统 BlackWall V1.1 · HTTP 网关已就绪")
+    print("  黑墙系统 BlackWall V1.2 · HTTP 网关已就绪")
     print(f"  地址   http://{args.host}:{args.port}      （交互文档 {args.host}:{args.port}/docs）")
     print(f"  令牌   X-API-Token: {args.token}")
     print(f"  审批   {'自动批准模式' if args.auto_approve else f'人工裁决（等待 {APPROVAL_WAIT:.0f}s，python duty_cli.py 操作）'}")

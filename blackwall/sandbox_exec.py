@@ -8,9 +8,11 @@
    系统调用、越界文件访问等危险意图 —— 逃逸代码在第一行执行之前就被拿下。
 2. **受限执行**：通过的子任务放进子进程运行——工作目录 jail、环境变量白名单
    （杜绝代码偷读服务器上的密钥）、硬超时、输出截断。
+3. **物理限额（V1.2 新增）**：Windows Job Object 硬隔离——内存上限（防内存炸弹）、
+   进程数上限（防 fork 炸弹）、随沙盒回收（防残留进程）；即使代码骗过了静态审查，
+   也逃不出物理配额。
 
-生产加固建议（写在 README）：容器化 / Windows AppContainer / Job Object
-资源限制 / seccomp / 只读挂载。本 demo 用纯标准库实现可运行的核心逻辑。
+生产可进一步：容器化 / Windows AppContainer / seccomp / 只读挂载。
 """
 from __future__ import annotations
 
@@ -23,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .models import Finding
+from .win_job import WindowsJobLimits
 
 #: 危险模块导入 → (风险说明, 严重度)
 BLOCKED_IMPORTS: dict[str, tuple[str, int]] = {
@@ -215,10 +218,12 @@ def _minimal_env(tmpdir: Path) -> dict[str, str]:
 
 
 def run_python(code: str, workdir: str | Path, timeout: float = 10,
-               max_output: int = 4000) -> ExecOutcome:
+               max_output: int = 4000, memory_mb: int = 256,
+               max_processes: int = 4) -> ExecOutcome:
     """在受限子进程中执行一段 Python 代码
 
-    流程：静态审查 → 写临时脚本 → 子进程运行（jail 工作目录 + 环境白名单 + 硬超时）
+    流程：静态审查 → 写临时脚本 → 子进程运行（jail 工作目录 + 环境白名单 +
+    硬超时 + Windows Job Object 内存/进程数硬限额）。
     """
     workdir = Path(workdir).resolve()
     findings = audit_code(code, workdir)
@@ -237,40 +242,48 @@ def run_python(code: str, workdir: str | Path, timeout: float = 10,
     script.write_text(code, encoding="utf-8")
 
     t0 = time.perf_counter()
+    job = WindowsJobLimits(memory_mb=memory_mb, max_processes=max_processes)
     try:
-        proc = subprocess.run(
-            [sys.executable, "-s", "-u", str(script)],
-            cwd=str(workdir),
-            env=_minimal_env(tmpdir),
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=timeout,
-        )
+        with job:   # 非 Windows 时空操作；销毁时强制回收残留子进程
+            proc = subprocess.Popen(
+                [sys.executable, "-s", "-u", str(script)],
+                cwd=str(workdir),
+                env=_minimal_env(tmpdir),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace",
+            )
+            job.assign(proc)   # 把子进程收进资源限额 Job
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                stdout, stderr = proc.communicate()
+                duration = (time.perf_counter() - t0) * 1000
+                return ExecOutcome(
+                    executed=True, ok=False,
+                    stdout=stdout[-max_output:], stderr=stderr[-max_output:],
+                    reason=f"执行超时（>{timeout}s），进程已被强制终止",
+                    duration_ms=duration,
+                    findings=findings + [Finding(
+                        kind="exec_policy", label="执行超时",
+                        detail="任务运行时间超出配额，已强制终止（可能为死循环或挖矿等资源滥用）",
+                        severity=8,
+                    )],
+                )
+
         duration = (time.perf_counter() - t0) * 1000
         ok = proc.returncode == 0
         reason = "" if ok else f"任务退出码 {proc.returncode}"
-        if not ok and proc.returncode != 0:
+        if not ok:
             findings = findings + [Finding(
                 kind="exec_error", label="任务异常退出",
                 detail=f"退出码 {proc.returncode}", severity=3,
-                snippet=(proc.stderr or "")[-200:],
+                snippet=(stderr or "")[-200:],
             )]
         return ExecOutcome(
             executed=True, ok=ok,
-            stdout=proc.stdout[-max_output:], stderr=proc.stderr[-max_output:],
+            stdout=stdout[-max_output:], stderr=stderr[-max_output:],
             duration_ms=duration, reason=reason, findings=findings,
-        )
-    except subprocess.TimeoutExpired:
-        duration = (time.perf_counter() - t0) * 1000
-        return ExecOutcome(
-            executed=True, ok=False,
-            reason=f"执行超时（>{timeout}s），进程已被强制终止",
-            duration_ms=duration,
-            findings=findings + [Finding(
-                kind="exec_policy", label="执行超时",
-                detail="任务运行时间超出配额，已强制终止（可能为死循环或挖矿等资源滥用）",
-                severity=8,
-            )],
         )
     finally:
         script.unlink(missing_ok=True)

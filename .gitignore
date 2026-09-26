@@ -12,3 +12,6 @@ dashboard/index.html
 # ---- 本地草稿（不进仓库）----
 roadmap.html
 *.log
+
+# ---- 商业物料（不进仓库：含价格策略，绝不公开）----
+sales/

@@ -1,4 +1,4 @@
-# 黑墙系统 BlackWall V1.1 · AI Agent 安全隔离墙
+# 黑墙系统 BlackWall V1.2 · AI Agent 安全隔离墙
 
 ![License](https://img.shields.io/badge/License-AGPL--3.0-002FA7)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-2b6cd4)
@@ -11,7 +11,14 @@
 
 ![监管大屏](assets/dashboard.png)
 
-**V1.1 新增**
+**V1.2 新增**
+
+- 🛡 **物理层硬隔离**（`blackwall/win_job.py`）：Windows Job Object 资源限额——内存上限、
+  进程数上限、随沙盒强制回收；**即使攻击代码骗过静态审查，也逃不出物理配额**；
+- 🧪 **硬隔离实测**（`test_sandbox_limits.py`）：内存炸弹 / 进程炸弹 / 死循环 / 回归，
+  5 项测试全绿——不是"代码里写了"，是"物理上真拦得住"。
+
+**V1.1 提供**
 
 - 🌐 **HTTP 网关**（`server.py`）：任何语言、任何形态的程序**零改造**接入——把"改代码"变成"改地址"；
 - 📊 **风控报告**（`report.py`）：一键把审计数据生成给管理层看的中文报告（自包含 HTML，可打印 / 另存 PDF）。
@@ -28,7 +35,7 @@
 │  注入/越狱检测        JSON 规则裁决      AST 静态审查    │
 │  编码绕过检测        人工审批挂起        目录 jail       │
 │                     资源/文本/参数匹配    环境变量白名单  │
-│                                        硬超时/输出截断   │
+│                                        硬超时/输出/限额  │
 │  L3 输出护栏         风险引擎           审计存储         │
 │  PII/密钥检测       行为风险分累计      SQLite 全量落库  │
 │  自动脱敏           自动熔断/人工解冻    监管大屏 / 报告  │
@@ -143,7 +150,7 @@ python report.py --days 30    # 仅最近 30 天
 |---|------|----------|------|
 | 1 | 客服问答（知识库检索） | 三扇门全放行 | ✔ 放行 |
 | 2 | 订单查询 | 单条只读 SQL | ✔ 放行 |
-| 3 | 沙盒内执行分析脚本 | AST 审查 + 隔离子进程**真执行** | ✔ 放行（出了真实统计结果） |
+| 3 | 沙盒内执行分析脚本 | AST 审查 + 隔离子进程**真执行**（含资源硬限额） | ✔ 放行（出了真实统计结果） |
 | 4 | 内部邮件 | 收件域白名单 | ✔ 放行 |
 | 5 | 回复草稿含手机号/身份证 | 输出护栏自动脱敏 | ◎ 脱敏放行 |
 | 6 | 清理 90 天前日志 | 挂起 → 安全员批准 → **真删** | ‖ 人工批准 |
@@ -184,18 +191,28 @@ python report.py --days 30    # 仅最近 30 天
 
 **真实运行的**：SQLite 真实读写/删除（场景 6 真的删日志）、隔离子进程真执行
 Python（场景 3 的统计是真算的）、AST 静态审查真拦截、策略/护栏/熔断/审计全链路真跑、
-网关审批真的挂起和唤醒、报告由真实审计数据生成。
+网关审批真的挂起和唤醒、报告由真实审计数据生成、Job Object 资源限额真的在拦
+（见 `test_sandbox_limits.py`）。
 
 **模拟的**：邮件只写入 `data/outbox.jsonl` 台账不外发；`run_shell` 只记录不真执行
 （演示模式）；场景脚本固定（真实企业里这些动作来自 LLM 的 tool-call）。
 
 **生产化路线**（demo 之外的加固建议）：
-1. 执行沙盒升级为容器 / Windows AppContainer / Job Object 资源限额、网络命名空间隔离；
+1. 执行沙盒升级为容器 / Windows AppContainer、网络命名空间隔离（Job Object 资源限额已于 V1.2 内建）；
 2. 护栏叠加语义模型二道防线（对规避型表达做向量/LLM 判断）；
 3. 审批通道接入企业 IM（钉钉/企业微信/飞书）与工单系统，加超时自动拒绝；
 4. 风险分加时间衰减与"同类攻击指纹"聚类，告警接短信/电话；
 5. 策略包热加载 + 版本化 + 灰度，配套策略单测；
 6. 审计库按月分片 + 哈希链防篡改 + 保留策略。
+
+### 硬隔离实测（Windows · V1.2）
+
+```bash
+py -3.12 test_sandbox_limits.py    # 或 python test_sandbox_limits.py
+```
+
+5 项测试：Job 可用性 → 内存炸弹（超 256MB 分配即失败）→ 进程炸弹（Job 内进程数封顶）→
+死循环硬超时 → 正常脚本回归。**全绿才发版**。
 
 ## 文件结构
 
@@ -205,7 +222,8 @@ blackwall/
 │   ├── box.py                #   门面：三扇门 + 编排（企业接入点）
 │   ├── policy_engine.py      #   策略引擎（JSON 规则加载与求值）
 │   ├── guards.py             #   输入/输出内容护栏（注入、PII、脱敏）
-│   ├── sandbox_exec.py       #   受限执行沙盒（AST 审查 + 隔离子进程）
+│   ├── sandbox_exec.py       #   受限执行沙盒（AST 审查 + 隔离子进程 + 资源限额）
+│   ├── win_job.py            #   ★ V1.2 Windows Job Object 硬隔离（内存/进程数/回收集）
 │   ├── risk.py               #   风险评分与自动熔断
 │   ├── audit.py              #   SQLite 审计存储（线程安全）
 │   ├── models.py             #   数据模型（Action/Decision/Event）
@@ -219,6 +237,7 @@ blackwall/
 ├── client_example.py         # ★ V1.1 客户端接入示例（零依赖 urllib，5 场景端到端）
 ├── play.py                   # ★ V1.1 交互体验台（连上网关点菜单玩）
 ├── play.cmd / server.cmd     # Windows 启动器（自动挑选 Python 3.10+，双击即用）
+├── test_sandbox_limits.py    # ★ V1.2 硬隔离实测（内存炸弹/进程炸弹/死循环/回归）
 ├── report.py                 # ★ V1.1 风控报告生成器（浅色 A4 排版）
 ├── build_dashboard.py        # 监管大屏生成器（深色，自包含 HTML）
 ├── bootstrap.py              # 装配（demo 与网关共用的构建逻辑）

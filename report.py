@@ -372,7 +372,7 @@ TEMPLATE = r"""<!DOCTYPE html>
 
   <footer>
     本报告由黑墙系统 BlackWall 根据审计库（data/audit.db）自动生成，全部数据可回溯至原始事件。<br>
-    审计范围：AI Agent 的输入 / 工具调用 / 受限执行 / 输出 全链路 ｜ 生成器版本 V1.1
+    审计范围：AI Agent 的输入 / 工具调用 / 受限执行 / 输出 全链路 ｜ 生成器版本 V1.2
   </footer>
 </div>
 </body>

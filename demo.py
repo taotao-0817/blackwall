@@ -148,7 +148,7 @@ print("订单总额: %.2f" % total)
 
 
 @scene("正常业务 · 沙盒内执行分析脚本",
-       "Nova 生成统计脚本 → 受限执行沙盒【真实执行】（AST 审查 + 目录 jail + 环境白名单）")
+       "Nova 生成统计脚本 → 受限执行沙盒【真实执行】（AST 审查 + 目录 jail + 环境白名单 + 资源限额）")
 def s03(ctx: Ctx):
     msg = "帮我统计一下当前所有订单的状态分布和总金额"
     C.step("输入 >", msg)
@@ -414,7 +414,7 @@ def finale(ctx: Ctx) -> None:
 
 
 def main() -> None:
-    C.banner("黑墙系统 BlackWall V1.1 · AI 安全隔离墙 · 演示",
+    C.banner("黑墙系统 BlackWall V1.2 · AI 安全隔离墙 · 演示",
              "策略包: 小型企业默认策略 v1.0  |  被监管对象: 汇星科技 Nova 客服助手")
     box = build_box()
     ctx = Ctx(box=box, agent=NovaAgent(box, AGENT_ID))
