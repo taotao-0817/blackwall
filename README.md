@@ -49,6 +49,9 @@ python demo.py
   风控报告 `data/reports/*.html`；
 - **双击打开大屏**即可回放本次会话。URL 末尾加 `#all` 可在打开时跳过动画、直接全量展开。
 
+想**亲手玩**：另开一个终端 `python server.py` 启动网关，再运行 `python play.py`
+（**交互体验台**：菜单式体验 放行 / 拦截 / 注入 / 审批 / 熔断 / 解冻，点数字就行）。
+
 ## 接入方式一：Python 内嵌（最轻）
 
 ```python
@@ -213,6 +216,7 @@ blackwall/
 ├── server.py                 # ★ V1.1 HTTP 网关（三扇门 REST + 审批工作流 + 鉴权）
 ├── duty_cli.py               # ★ V1.1 值班安全员控制台（审批裁决）
 ├── client_example.py         # ★ V1.1 客户端接入示例（零依赖 urllib，5 场景端到端）
+├── play.py                   # ★ V1.1 交互体验台（连上网关点菜单玩）
 ├── report.py                 # ★ V1.1 风控报告生成器（浅色 A4 排版）
 ├── build_dashboard.py        # 监管大屏生成器（深色，自包含 HTML）
 ├── bootstrap.py              # 装配（demo 与网关共用的构建逻辑）
