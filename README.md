@@ -40,7 +40,7 @@
 ```bash
 git clone https://github.com/taotao-0817/blackwall.git
 cd blackwall
-python demo.py
+python demo.py      # 需要 Python 3.10+；Windows 若 python 是旧版本，改用:  py -3.12 demo.py
 ```
 
 - 跑完 **14 个攻防场景**（正常业务 → 脱敏 → 审批 → 注入/外泄/越权/危险命令/
@@ -51,6 +51,7 @@ python demo.py
 
 想**亲手玩**：另开一个终端 `python server.py` 启动网关，再运行 `python play.py`
 （**交互体验台**：菜单式体验 放行 / 拦截 / 注入 / 审批 / 熔断 / 解冻，点数字就行）。
+Windows 用户可直接双击 `server.cmd` + `play.cmd`。
 
 ## 接入方式一：Python 内嵌（最轻）
 
@@ -217,6 +218,7 @@ blackwall/
 ├── duty_cli.py               # ★ V1.1 值班安全员控制台（审批裁决）
 ├── client_example.py         # ★ V1.1 客户端接入示例（零依赖 urllib，5 场景端到端）
 ├── play.py                   # ★ V1.1 交互体验台（连上网关点菜单玩）
+├── play.cmd / server.cmd     # Windows 启动器（自动挑选 Python 3.10+，双击即用）
 ├── report.py                 # ★ V1.1 风控报告生成器（浅色 A4 排版）
 ├── build_dashboard.py        # 监管大屏生成器（深色，自包含 HTML）
 ├── bootstrap.py              # 装配（demo 与网关共用的构建逻辑）
@@ -231,6 +233,12 @@ blackwall/
 
 - **核心引擎 / 演示 / 报告**：Python 3.10+，**零第三方依赖**（纯标准库）；
 - **HTTP 网关**：额外需要 `pip install -r requirements.txt`（fastapi + uvicorn）。
+
+> **Windows 提示**：如果 `python --version` 显示的是老版本（如 3.6），说明系统 PATH 里
+> 有旧解释器抢先（常见于装过 Anaconda / ArcGIS 的机器）。用 Windows 自带的 **py 启动器**
+> 指定版本即可，无需改 PATH：`py -3.12 demo.py`；
+> 也可以直接双击仓库里的 **`play.cmd`**（体验台）和 **`server.cmd`**（网关，
+> 首次运行自动安装依赖）——它们会自动挑选 3.12 或系统最新 Python。
 
 ## 开源与商业版
 
