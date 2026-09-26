@@ -272,12 +272,15 @@ def decide_approval(ticket_id: str, req: DecideReq, _: None = Depends(require_to
 @app.get("/v1/audit/events")
 def audit_events(limit: int = 100, agent_id: str | None = None,
                  effect: str | None = None, _: None = Depends(require_token)):
+    # limit 归一化：注意 Python 中 rows[-0:] == rows[0:]（会返回全量），
+    # 必须显式处理 0 / 负数；另设上限防止单次拉走整库
+    limit = max(0, min(int(limit), 1000))
     rows = BOX.audit.rows()
     if agent_id:
         rows = [r for r in rows if r["agent_id"] == agent_id]
     if effect:
         rows = [r for r in rows if r["effect"] == effect]
-    return {"total": len(rows), "events": rows[-limit:]}
+    return {"total": len(rows), "events": rows[-limit:] if limit else []}
 
 
 @app.get("/v1/stats")

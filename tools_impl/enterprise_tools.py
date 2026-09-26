@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from blackwall.models import Finding
+from blackwall.paths import is_within
 from blackwall.sandbox_exec import SandboxViolation, run_python
 
 # ==========================================================================
@@ -180,7 +181,7 @@ class Toolbox:
         if not p.is_absolute():
             p = self.fs / p
         resolved = p.resolve()
-        if not str(resolved).lower().startswith(str(self.fs).lower()):
+        if not is_within(resolved, self.fs):
             raise SandboxViolation(
                 f"文件路径越出受管目录：{str(path)[:90]}",
                 [Finding(kind="escape", label="文件越界访问",

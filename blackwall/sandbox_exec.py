@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .models import Finding
+from .paths import is_within
 from .win_job import WindowsJobLimits
 
 #: 危险模块导入 → (风险说明, 严重度)
@@ -124,13 +125,13 @@ def _jail_check(path_str: str, workdir: Path) -> str | None:
     if ".." in p.split("/"):
         return "路径包含 `..`，试图突破沙盒目录"
     # Windows 盘符绝对路径 / UNC 路径 → 必须在 jail 内
+    # （用路径段求值 is_within，而非字符串前缀——`company_fs_old` 能骗过前缀匹配）
     if (len(p) >= 2 and p[1] == ":") or p.startswith("//"):
         try:
-            resolved = str(Path(path_str).resolve()).lower().replace("\\", "/")
+            resolved = Path(path_str).resolve()
         except (OSError, ValueError):
             return f"非法路径: {path_str[:80]}"
-        jail = str(workdir.resolve()).lower().replace("\\", "/")
-        if not resolved.startswith(jail):
+        if not is_within(resolved, workdir):
             return f"绝对路径越出沙盒目录: {path_str[:80]}"
     return None
 
@@ -217,6 +218,23 @@ def _minimal_env(tmpdir: Path) -> dict[str, str]:
     return keep
 
 
+def _tail_text(path: Path, max_chars: int) -> str:
+    """从文件尾部读取至多 max_chars 个字符
+
+    按字节定位后只读尾部（utf-8 单字符最多 4 字节，留少量余量），
+    避免把子进程的海量输出整读进父进程内存。
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return ""
+    take = max_chars * 4 + 8
+    with open(path, "rb") as f:
+        f.seek(max(0, size - take))
+        data = f.read(take)
+    return data.decode("utf-8", errors="replace")[-max_chars:]
+
+
 def run_python(code: str, workdir: str | Path, timeout: float = 10,
                max_output: int = 4000, memory_mb: int = 256,
                max_processes: int = 4) -> ExecOutcome:
@@ -241,37 +259,53 @@ def run_python(code: str, workdir: str | Path, timeout: float = 10,
     script = tmpdir / f"job_{int(time.time() * 1000)}.py"
     script.write_text(code, encoding="utf-8")
 
+    out_file = tmpdir / f"{script.stem}.out"
+    err_file = tmpdir / f"{script.stem}.err"
+
     t0 = time.perf_counter()
     job = WindowsJobLimits(memory_mb=memory_mb, max_processes=max_processes)
+    soft_findings: list[Finding] = []
     try:
         with job:   # 非 Windows 时空操作；销毁时强制回收残留子进程
-            proc = subprocess.Popen(
-                [sys.executable, "-s", "-u", str(script)],
-                cwd=str(workdir),
-                env=_minimal_env(tmpdir),
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, encoding="utf-8", errors="replace",
-            )
-            job.assign(proc)   # 把子进程收进资源限额 Job
-            try:
-                stdout, stderr = proc.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                stdout, stderr = proc.communicate()
-                duration = (time.perf_counter() - t0) * 1000
-                return ExecOutcome(
-                    executed=True, ok=False,
-                    stdout=stdout[-max_output:], stderr=stderr[-max_output:],
-                    reason=f"执行超时（>{timeout}s），进程已被强制终止",
-                    duration_ms=duration,
-                    findings=findings + [Finding(
-                        kind="exec_policy", label="执行超时",
-                        detail="任务运行时间超出配额，已强制终止（可能为死循环或挖矿等资源滥用）",
-                        severity=8,
-                    )],
+            # 子进程输出落到临时文件（而非内存管道）：即使子进程疯狂打印，
+            # 也只占磁盘；读取时仅取尾部 max_output 字符，父进程内存恒定。
+            with open(out_file, "wb") as fo, open(err_file, "wb") as fe:
+                proc = subprocess.Popen(
+                    [sys.executable, "-s", "-u", str(script)],
+                    cwd=str(workdir),
+                    env=_minimal_env(tmpdir),
+                    stdout=fo, stderr=fe,
                 )
+                if job.available and not job.assign(proc):
+                    # 限额指派失败不能静默（否则"资源限额生效"的宣称失去担保）——
+                    # 留痕到审计，由上层风险策略决定是否从严
+                    soft_findings.append(Finding(
+                        kind="exec_policy", label="资源限额未生效",
+                        detail=f"Job Object 指派子进程失败：{job.error or '原因未知'}",
+                        severity=5,
+                    ))
+                try:
+                    proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                    duration = (time.perf_counter() - t0) * 1000
+                    return ExecOutcome(
+                        executed=True, ok=False,
+                        stdout=_tail_text(out_file, max_output),
+                        stderr=_tail_text(err_file, max_output),
+                        reason=f"执行超时（>{timeout}s），进程已被强制终止",
+                        duration_ms=duration,
+                        findings=findings + soft_findings + [Finding(
+                            kind="exec_policy", label="执行超时",
+                            detail="任务运行时间超出配额，已强制终止（可能为死循环或挖矿等资源滥用）",
+                            severity=8,
+                        )],
+                    )
 
         duration = (time.perf_counter() - t0) * 1000
+        stdout = _tail_text(out_file, max_output)
+        stderr = _tail_text(err_file, max_output)
         ok = proc.returncode == 0
         reason = "" if ok else f"任务退出码 {proc.returncode}"
         if not ok:
@@ -282,8 +316,10 @@ def run_python(code: str, workdir: str | Path, timeout: float = 10,
             )]
         return ExecOutcome(
             executed=True, ok=ok,
-            stdout=stdout[-max_output:], stderr=stderr[-max_output:],
-            duration_ms=duration, reason=reason, findings=findings,
+            stdout=stdout, stderr=stderr,
+            duration_ms=duration, reason=reason, findings=findings + soft_findings,
         )
     finally:
         script.unlink(missing_ok=True)
+        out_file.unlink(missing_ok=True)
+        err_file.unlink(missing_ok=True)

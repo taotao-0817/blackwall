@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import threading
 from collections import defaultdict
 
 from .models import Effect
@@ -31,31 +32,40 @@ class RiskEngine:
         self._score: dict[str, int] = defaultdict(int)
         self._frozen: dict[str, str] = {}     # agent_id -> 冻结原因
         self.baseline_windows: dict[str, list] = defaultdict(list)
+        # 网关注解运行在 FastAPI 线程池中，register 是"读-改-写"——
+        # 不串行化会在并发下丢更新（漏计风险分 → 熔断可被竞态规避）
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------------------
     def register(self, agent_id: str, effect: Effect) -> tuple[int, bool]:
         """登记一次裁决。返回 (最新风险分, 是否**刚刚**触发冻结)"""
-        self._score[agent_id] = min(100, self._score[agent_id] + EFFECT_WEIGHT.get(effect, 0))
-        just_frozen = False
-        if self._score[agent_id] >= self.freeze_threshold and agent_id not in self._frozen:
-            self._frozen[agent_id] = "风控熔断：高危行为累积风险分突破阈值"
-            just_frozen = True
-        return self._score[agent_id], just_frozen
+        with self._lock:
+            self._score[agent_id] = min(100, self._score[agent_id] + EFFECT_WEIGHT.get(effect, 0))
+            just_frozen = False
+            if self._score[agent_id] >= self.freeze_threshold and agent_id not in self._frozen:
+                self._frozen[agent_id] = "风控熔断：高危行为累积风险分突破阈值"
+                just_frozen = True
+            return self._score[agent_id], just_frozen
 
     def score(self, agent_id: str) -> int:
-        return self._score.get(agent_id, 0)
+        with self._lock:
+            return self._score.get(agent_id, 0)
 
     def is_frozen(self, agent_id: str) -> bool:
-        return agent_id in self._frozen
+        with self._lock:
+            return agent_id in self._frozen
 
     def freeze_reason(self, agent_id: str) -> str:
-        return self._frozen.get(agent_id, "")
+        with self._lock:
+            return self._frozen.get(agent_id, "")
 
     def freeze(self, agent_id: str, reason: str) -> None:
-        self._frozen[agent_id] = reason
+        with self._lock:
+            self._frozen[agent_id] = reason
 
     def unfreeze(self, agent_id: str, keep_score_reset: bool = True) -> None:
         """人工解冻：清空冻结状态；是否清零风险分由安全员决定"""
-        self._frozen.pop(agent_id, None)
-        if keep_score_reset:
-            self._score[agent_id] = 0
+        with self._lock:
+            self._frozen.pop(agent_id, None)
+            if keep_score_reset:
+                self._score[agent_id] = 0
