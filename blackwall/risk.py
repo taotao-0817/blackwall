@@ -13,7 +13,8 @@
 from __future__ import annotations
 
 import threading
-from collections import defaultdict
+import time
+from collections import defaultdict, deque
 
 from .models import Effect
 
@@ -32,6 +33,8 @@ class RiskEngine:
         self._score: dict[str, int] = defaultdict(int)
         self._frozen: dict[str, str] = {}     # agent_id -> 冻结原因
         self.baseline_windows: dict[str, list] = defaultdict(list)
+        #: V1.3 敏感工具调用滑窗（防"少量多次"拖取：窗口内频率超限即由调用方处置）
+        self._call_win: dict[str, deque[float]] = defaultdict(deque)
         # 网关注解运行在 FastAPI 线程池中，register 是"读-改-写"——
         # 不串行化会在并发下丢更新（漏计风险分 → 熔断可被竞态规避）
         self._lock = threading.RLock()
@@ -69,3 +72,19 @@ class RiskEngine:
             self._frozen.pop(agent_id, None)
             if keep_score_reset:
                 self._score[agent_id] = 0
+
+    # ------------------------------------------------------------------
+    def note_call(self, agent_id: str, tool: str, window: float = 60.0) -> int:
+        """记录一次敏感工具调用，返回窗口内累计次数（V1.3）
+
+        用途：单次查询本就限额（≤50 行），但"循环 N 次"能绕开——
+        滑动窗口把"少量多次"的拖取行为暴露出来，由调用方按阈值处置。
+        """
+        key = f"{agent_id}|{tool}"
+        now = time.time()
+        with self._lock:
+            dq = self._call_win[key]
+            dq.append(now)
+            while dq and now - dq[0] > window:
+                dq.popleft()
+            return len(dq)

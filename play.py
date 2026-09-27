@@ -14,9 +14,12 @@
 菜单覆盖：正常放行 / 越权拦截 / 注入隔离 / 挂起转人工 / 风险分爬升 → 熔断 / 人工解冻。
 
 环境变量（可选）：
-    BLACKWALL_URL    网关地址（默认 http://127.0.0.1:8765）
-    BLACKWALL_TOKEN  访问令牌（默认 blackwall-demo-token）
-    BLACKWALL_AGENT  体验用的 Agent 名（默认 demo-player）
+    BLACKWALL_URL          网关地址（默认 http://127.0.0.1:8765）
+    BLACKWALL_TOKEN        管理凭证（默认 blackwall-demo-token，对应 server --admin-token）
+    BLACKWALL_AGENT_TOKEN  Agent 凭证（默认 blackwall-agent-token，对应 server --agent-token）
+
+V1.3：体验台同时持两种凭证——三扇门走 Agent 凭证（被监管方视角），
+解冻/统计走管理凭证（安全员视角）；Agent 身份由服务端绑定、不接受自报。
 """
 from __future__ import annotations
 
@@ -32,17 +35,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from blackwall import console as C  # noqa: E402
 
 BASE = os.environ.get("BLACKWALL_URL", "http://127.0.0.1:8765").rstrip("/")
-TOKEN = os.environ.get("BLACKWALL_TOKEN", "blackwall-demo-token")
-AGENT = os.environ.get("BLACKWALL_AGENT", "demo-player")
+ADMIN_TOKEN = os.environ.get("BLACKWALL_TOKEN", "blackwall-demo-token")
+AGENT_TOKEN = os.environ.get("BLACKWALL_AGENT_TOKEN", "blackwall-agent-token")
+AGENT = "demo-agent"        # 启动时由 /v1/whoami 探测校正（身份由凭证绑定）
 
 
 # ------------------------------------------------------------------ 基础
-def api(method: str, path: str, body: dict | None = None) -> dict:
-    """调用黑墙网关（标准库 urllib，UTF-8 无编码坑）"""
+def api(method: str, path: str, body: dict | None = None, admin: bool = False) -> dict:
+    """调用黑墙网关（默认走 Agent 凭证；admin=True 走管理凭证）"""
     req = urllib.request.Request(
         BASE + path, method=method,
         data=json.dumps(body).encode("utf-8") if body is not None else None,
-        headers={"Content-Type": "application/json", "X-API-Token": TOKEN})
+        headers={"Content-Type": "application/json",
+                 "X-API-Token": ADMIN_TOKEN if admin else AGENT_TOKEN})
     try:
         with urllib.request.urlopen(req, timeout=300) as r:
             return json.loads(r.read().decode("utf-8"))
@@ -136,8 +141,9 @@ def scene_fuse() -> None:
 
 
 def scene_unfreeze() -> None:
-    headline("人工解冻", "安全员复核后把 Agent 放出来（冻结不能自动解除）")
-    r = api("POST", f"/v1/agents/{AGENT}/unfreeze", {"by": "Rin", "note": "体验台人工解冻"})
+    headline("人工解冻（管理凭证）", "安全员复核后把 Agent 放出来（冻结不能自动解除）")
+    r = api("POST", f"/v1/agents/{AGENT}/unfreeze", {"note": "体验台人工解冻"},
+            admin=True)
     if r:
         print(C.c(f"   → 已解冻，风险分归还（当前 {r.get('risk', 0)}/100），Agent 恢复工作。", "bright_green"))
 
@@ -152,8 +158,8 @@ def scene_status() -> None:
 
 
 def scene_stats() -> None:
-    headline("全局监管统计", "一次看全网关累计处置")
-    r = api("GET", "/v1/stats")
+    headline("全局监管统计（管理凭证）", "一次看全网关累计处置")
+    r = api("GET", "/v1/stats", admin=True)
     if not r:
         return
     print(f"   监管行为总量  {r.get('total')}")
@@ -177,9 +183,20 @@ MENU = [
 ]
 
 
+def _probe_identity() -> None:
+    """启动时探测 Agent 凭证绑定的身份（V1.3：身份由服务端绑定，不能自报）"""
+    global AGENT
+    r = api("GET", "/v1/whoami")
+    if r.get("kind") == "agent" and r.get("agent_id"):
+        AGENT = r["agent_id"]
+    elif r.get("kind") == "admin":
+        print(C.c("   ⚠ BLACKWALL_AGENT_TOKEN 配成了管理凭证——三扇门需要 Agent 凭证", "yellow"))
+
+
 def main() -> None:
+    _probe_identity()
     C.banner("黑墙系统 BlackWall · 交互体验台",
-             f"网关 {BASE}  ｜  被监管 Agent：{AGENT}")
+             f"网关 {BASE}  ｜  被监管 Agent：{AGENT}（身份由 agent 凭证绑定）")
     while True:
         print()
         for k, label, _ in MENU:

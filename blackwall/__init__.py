@@ -1,5 +1,5 @@
 """
-黑墙系统 BlackWall V1.2 · AI Agent 安全隔离墙
+黑墙系统 BlackWall V1.3 · AI Agent 安全隔离墙
 ==============================
 为小型企业自研的 AI Agent / 程序提供安全限制与监管服务。
 
@@ -29,7 +29,7 @@ from .models import (Action, Decision, Effect, Event, Finding, Phase,
                      ToolResult)
 from .sandbox_exec import SandboxViolation, audit_code, run_python
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 __all__ = [
     "BlackWall", "GuardResult", "ToolSpec",
     "Action", "Decision", "Effect", "Event", "Finding", "Phase", "ToolResult",

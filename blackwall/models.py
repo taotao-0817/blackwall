@@ -79,6 +79,9 @@ class Action:
     args: dict = field(default_factory=dict)
     content: str = ""
     meta: dict = field(default_factory=dict)
+    #: V1.3 能力标签（read_fs / write_fs / exec / send_ext / db_read / db_write / pii …）
+    #: 由沙盒按工具注册信息注入——策略可以按"能力"匹配，新工具一注册就自动落入监管
+    capabilities: list[str] = field(default_factory=list)
     action_id: str = field(default_factory=lambda: f"A-{uuid.uuid4().hex[:8]}")
 
     # ---- 供策略引擎/护栏使用的统一视图 ----

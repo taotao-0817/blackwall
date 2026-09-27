@@ -52,6 +52,9 @@ BLOCKED_IMPORTS: dict[str, tuple[str, int]] = {
     "marshal": ("反序列化执行风险", 7),
     "shutil": ("高危文件操作", 7),
     "webbrowser": ("唤起外部程序", 6),
+    "importlib": ("动态导入模块（可绕过静态审查）", 9),
+    "runpy": ("动态执行模块代码", 9),
+    "builtins": ("访问解释器内建命名空间（可绕过拦截）", 8),
 }
 
 #: 危险函数调用 → (风险说明, 严重度)
@@ -77,6 +80,16 @@ BLOCKED_CALLS: dict[str, tuple[str, int]] = {
     "ctypes.CDLL": ("加载动态库", 9),
     "ctypes.WinDLL": ("加载动态库", 9),
 }
+
+#: V1.3 受控文件名特征——代码中出现即硬拦（封堵"用脚本读取小抄"绕过资源策略）
+SENSITIVE_FILE_HINTS = (
+    "salaries", "payroll", "薪资", "工资", "config.env", ".env",
+    "secret", "credential", "password", "passwd", "id_rsa", ".pem", ".key",
+)
+
+#: V1.3 getattr 动态属性访问的高危目标模块（取点号名首段判定）
+_SENSITIVE_MODULE_ROOTS = {"os", "sys", "subprocess", "ctypes", "builtins",
+                           "importlib", "shutil", "socket", "posix"}
 
 #: 判定为"硬拒绝"的严重度阈值（静态审查阶段）
 HARD_BLOCK_SEVERITY = 7
@@ -137,7 +150,16 @@ def _jail_check(path_str: str, workdir: Path) -> str | None:
 
 
 def audit_code(code: str, workdir: str | Path) -> list[Finding]:
-    """静态审查：解析 AST，找出危险导入 / 调用 / 越界文件访问"""
+    """静态审查：解析 AST，找出危险导入 / 危险函数引用 / 越界与受控文件访问
+
+    V1.3 升级（对抗"动态构造"规避写法；注意本层是快速筛查、不是执行边界）：
+    - 危险函数从"仅调用"扩到"**引用即拦**"（`s = os.system; s("calc")` 别名写法命中）；
+    - open()/Path() 字面量路径做 jail + 受控文件名双检查；open() 参数为动态
+      表达式（变量/拼接/间接路径）时直接硬拦——无法静态确认目标的读写不放行；
+    - getattr / __builtins__ / `from os import system` 等动态取用手法纳入审查；
+    - importlib / runpy 等动态导入模块列入黑名单。
+    终极兜底是 OS 级隔离（见 README 生产化路线）——本层负责"低成本拿下绝大多数"。
+    """
     workdir = Path(workdir)
     findings: list[Finding] = []
 
@@ -150,6 +172,10 @@ def audit_code(code: str, workdir: str | Path) -> list[Finding]:
             severity=6,
         )]
 
+    def add(label: str, detail: str, sev: int, snippet: str = "") -> None:
+        findings.append(Finding(kind="escape", label=label, detail=detail,
+                                severity=sev, snippet=snippet))
+
     for node in ast.walk(tree):
         # --- 危险 import ---
         if isinstance(node, ast.Import):
@@ -157,42 +183,80 @@ def audit_code(code: str, workdir: str | Path) -> list[Finding]:
                 root = alias.name.split(".")[0]
                 if root in BLOCKED_IMPORTS:
                     desc, sev = BLOCKED_IMPORTS[root]
-                    findings.append(Finding(
-                        kind="escape", label="危险模块导入",
-                        detail=f"导入 `{alias.name}`：{desc}",
-                        severity=sev, snippet=f"import {alias.name}",
-                    ))
+                    add("危险模块导入", f"导入 `{alias.name}`：{desc}", sev,
+                        f"import {alias.name}")
         elif isinstance(node, ast.ImportFrom):
             root = (node.module or "").split(".")[0]
             if root in BLOCKED_IMPORTS:
                 desc, sev = BLOCKED_IMPORTS[root]
-                findings.append(Finding(
-                    kind="escape", label="危险模块导入",
-                    detail=f"导入 `{node.module}`：{desc}",
-                    severity=sev, snippet=f"from {node.module} import ...",
-                ))
+                add("危险模块导入", f"导入 `{node.module}`：{desc}", sev,
+                    f"from {node.module} import ...")
+            if root == "os":    # from os import system / popen / remove …（别名直取高危函数）
+                for alias in node.names:
+                    if alias.name in ("system", "popen", "execv", "execve", "execvp",
+                                      "execl", "execlp", "remove", "unlink", "rmdir",
+                                      "kill", "spawnv", "spawnl"):
+                        add("危险函数导入",
+                            f"从 os 直接导入高危函数 `{alias.name}`（别名绕过的常见手法）",
+                            9, f"from os import {alias.name}")
 
-        # --- 危险调用 / 越界 open ---
+        # --- 危险函数：引用即拦（`s = os.system` 之类的别名同样命中）---
+        elif isinstance(node, ast.Attribute):
+            name = _dotted(node)
+            if name in BLOCKED_CALLS:
+                desc, sev = BLOCKED_CALLS[name]
+                add("危险函数引用", f"引用 `{name}`：{desc}（赋值/传参别名同样拦截）",
+                    sev, name)
+        elif isinstance(node, ast.Name):
+            if node.id in BLOCKED_CALLS:
+                desc, sev = BLOCKED_CALLS[node.id]
+                add("危险函数引用", f"引用 `{node.id}`：{desc}", sev, node.id)
+            elif node.id == "__builtins__":
+                add("危险引用", "访问 __builtins__ 命名空间（意图绕过解释器限制）", 8,
+                    "__builtins__")
+
+        # --- 文件访问 / 动态属性 ---
         elif isinstance(node, ast.Call):
             name = _dotted(node.func)
-            if name:
-                if name in BLOCKED_CALLS:
-                    desc, sev = BLOCKED_CALLS[name]
-                    findings.append(Finding(
-                        kind="escape", label="危险函数调用",
-                        detail=f"调用 `{name}()`：{desc}",
-                        severity=sev, snippet=f"{name}(...)",
-                    ))
-                elif name in ("open", "io.open") and node.args:
-                    first = node.args[0]
-                    if isinstance(first, ast.Constant) and isinstance(first.value, str):
-                        violation = _jail_check(first.value, workdir)
-                        if violation:
-                            findings.append(Finding(
-                                kind="escape", label="文件越界访问",
-                                detail=violation, severity=8,
-                                snippet=f"open({first.value[:60]!r})",
-                            ))
+            if not name:
+                continue
+            if name in ("open", "io.open", "pathlib.Path", "Path"):
+                target = node.args[0] if node.args else None
+                if isinstance(target, ast.Constant) and isinstance(target.value, str):
+                    pval = str(target.value)
+                    violation = _jail_check(pval, workdir)
+                    if violation:
+                        add("文件越界访问", violation, 8, f"{name}({pval[:60]!r})")
+                    low = pval.lower().replace("\\", "/")
+                    hit = next((h for h in SENSITIVE_FILE_HINTS if h in low), None)
+                    if hit:
+                        add("受控文件访问",
+                            f"代码试图打开受控文件（文件名特征命中 `{hit}`）：{pval[:60]}",
+                            8, f"{name}({pval[:60]!r})")
+                elif name in ("open", "io.open"):
+                    add("动态文件路径",
+                        "open() 参数为动态表达式，无法静态审查目标路径——沙盒内仅允许"
+                        "字面量路径（确实需要动态路径时请走人工审批）", 7, "open(<expr>)")
+                else:
+                    add("动态路径构造",
+                        "Path() 参数为动态表达式，建议改为字面量路径以便静态审查",
+                        5, "Path(<expr>)")
+            elif name == "getattr":
+                base = node.args[0] if node.args else None
+                attr = node.args[1] if len(node.args) > 1 else None
+                base_name = _dotted(base) if base is not None else None
+                if base_name and base_name.split(".")[0] in _SENSITIVE_MODULE_ROOTS:
+                    add("动态属性访问",
+                        f"getattr 目标为敏感模块 `{base_name}`（动态取属性可绕过静态拦截）",
+                        8, "getattr(...)")
+                elif not (isinstance(attr, ast.Constant) and isinstance(attr.value, str)):
+                    add("动态属性访问",
+                        "getattr 属性名为动态表达式（拼接/变量），无法静态审查",
+                        8, "getattr(...)")
+                else:
+                    add("动态属性访问",
+                        f"getattr({base_name or '?'}, {attr.value!r}) —— 留痕审查",
+                        5, "getattr(...)")
     return findings
 
 

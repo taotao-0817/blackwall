@@ -280,16 +280,25 @@ class Toolbox:
         return {"mock": True, "command": command, "exit_code": 0,
                 "output": "[演示模式] 命令已记录，未在真实主机上执行"}
 
-    # ---- 注册清单 ----
-    def build(self) -> dict[str, tuple[Callable[..., Any], str]]:
+    # ---- 注册清单（V1.3：每个工具标注能力标签，策略按"能力"而非"工具名"监管）----
+    def build(self) -> dict[str, tuple[Callable[..., Any], str, tuple[str, ...]]]:
         return {
-            "search_knowledge": (self.search_knowledge, "检索企业内部知识库（只读）"),
-            "query_order": (self.query_order, "按订单号查询订单状态（只读）"),
-            "query_customer_db": (self.query_customer_db, "对客户/订单库执行只读 SQL 查询"),
-            "send_email": (self.send_email, "发送邮件（写入外发台账）"),
-            "read_file": (self.read_file, "读取企业文件（限受管目录）"),
-            "write_file": (self.write_file, "写入企业文件（限受管目录）"),
-            "delete_records": (self.delete_records, "删除数据库记录（高危，仅 logs 表）"),
-            "run_script": (self.run_script, "在受限沙盒中执行 Python 分析脚本"),
-            "run_shell": (self.run_shell, "执行系统维护命令（演示中不真跑）"),
+            "search_knowledge": (self.search_knowledge, "检索企业内部知识库（只读）",
+                                 ("read_kb",)),
+            "query_order": (self.query_order, "按订单号查询订单状态（只读）",
+                            ("db_read",)),
+            "query_customer_db": (self.query_customer_db, "对客户/订单库执行只读 SQL 查询",
+                                  ("db_read", "pii")),
+            "send_email": (self.send_email, "发送邮件（写入外发台账）",
+                           ("send_ext",)),
+            "read_file": (self.read_file, "读取企业文件（限受管目录）",
+                          ("read_fs",)),
+            "write_file": (self.write_file, "写入企业文件（限受管目录）",
+                           ("write_fs",)),
+            "delete_records": (self.delete_records, "删除数据库记录（高危，仅 logs 表）",
+                               ("db_write",)),
+            "run_script": (self.run_script, "在受限沙盒中执行 Python 分析脚本",
+                           ("exec",)),
+            "run_shell": (self.run_shell, "执行系统维护命令（演示中不真跑）",
+                          ("exec",)),
         }

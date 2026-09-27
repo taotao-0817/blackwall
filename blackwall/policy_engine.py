@@ -45,10 +45,15 @@ class Rule:
 
         m = raw.get("match", {})
         self.tools: list[str] | None = m.get("tools")
+        self.capabilities: list[str] | None = m.get("capabilities")   # V1.3：按能力匹配
         self.phases: list[str] | None = m.get("phases")
         self.arg_regex: dict[str, list[re.Pattern]] = {
             k: [re.compile(p, re.IGNORECASE) for p in v]
             for k, v in m.get("arg_regex", {}).items()
+        }
+        self.arg_regex_each: dict[str, list[re.Pattern]] = {
+            k: [re.compile(p, re.IGNORECASE) for p in v]
+            for k, v in m.get("arg_regex_each", {}).items()
         }
         self.arg_regex_not: dict[str, list[re.Pattern]] = {
             k: [re.compile(p, re.IGNORECASE) for p in v]
@@ -69,6 +74,9 @@ class Rule:
             return False, []
         if self.tools and not any(fnmatch.fnmatch(action.tool, t) for t in self.tools):
             return False, []
+        if self.capabilities and not any(c in action.capabilities for c in self.capabilities):
+            # V1.3：按能力匹配——新工具注册时打了标签就自动落入监管（不再有"工具暗门"）
+            return False, []
 
         hits: list[str] = []
         str_args = {k: str(v) for k, v in action.args.items()}
@@ -81,10 +89,21 @@ class Rule:
                 return False, []
             hits.append(f"{arg}≈“{hit.group(0)[:40]}”")
 
-        # 白名单排除字段（命中任一 → 规则不适用）
+        # 逐项全中字段（V1.3："全部满足"语义——列表型参数的每一项都要命中）
+        for arg, pats in self.arg_regex_each.items():
+            value = str_args.get(arg, "")
+            parts = [x.strip() for x in re.split(r"[,;，；]\s*", value) if x.strip()]
+            if not parts or not all(any(p.search(x) for p in pats) for x in parts):
+                return False, []
+            hits.append(f"{arg}=“{value[:40]}” 全部分项命中白名单")
+
+        # 白名单排除字段（V1.3 语义升级：按分项判定——字段按逗号/分号拆分后，
+        # **每个分项都命中白名单**才排除规则；混入任意外部值都会被规则捕获。
+        # 防"混合收件人"绕过：boss@company.com, attacker@x.com 不再骗过白名单）
         for arg, pats in self.arg_regex_not.items():
             value = str_args.get(arg, "")
-            if any(p.search(value) for p in pats):
+            parts = [x.strip() for x in re.split(r"[,;，；]\s*", value) if x.strip()] or [value]
+            if value and all(any(p.search(x) for p in pats) for x in parts):
                 return False, []
             hits.append(f"{arg}=“{value[:40]}” 命中限制条件")
 
@@ -120,6 +139,7 @@ class PolicyEngine:
         self.name = "未命名策略包"
         self.version = "0"
         self.default_effect = Effect.ALLOW
+        self.capability_effects: dict[str, Effect] = {}   # V1.3：按能力的默认收紧表
         self.rules: list[Rule] = []
         self.load()
 
@@ -128,6 +148,10 @@ class PolicyEngine:
         self.name = raw.get("name", self.name)
         self.version = raw.get("version", self.version)
         self.default_effect = Effect(raw.get("default_effect", "allow"))
+        self.capability_effects = {
+            cap: Effect(eff) for cap, eff in raw.get("capability_effects", {}).items()
+            if not cap.startswith("_")
+        }
         self.rules = [Rule(r) for r in raw.get("rules", [])]
 
     # ------------------------------------------------------------------
@@ -139,6 +163,18 @@ class PolicyEngine:
                 matched.append((rule, hits))
 
         if not matched:
+            # V1.3 默认收紧：写/执行/外发类能力在无显式规则时按"能力默认"处置
+            #（如 exec → approval），不再一律放行；读类能力仍走 default_effect
+            cap_hit = [c for c in action.capabilities if c in self.capability_effects]
+            if cap_hit:
+                cap_effect = max((self.capability_effects[c] for c in cap_hit),
+                                 key=lambda e: EFFECT_SEVERITY[e])
+                if EFFECT_SEVERITY[cap_effect] > EFFECT_SEVERITY[self.default_effect]:
+                    return Decision(
+                        effect=cap_effect,
+                        reason=f"未命中显式规则；按能力默认收紧处置（{'、'.join(cap_hit)}）",
+                        rule_id="CAPABILITY-DEFAULT",
+                    )
             return Decision(
                 effect=self.default_effect,
                 reason="未命中任何限制规则，按默认策略放行",

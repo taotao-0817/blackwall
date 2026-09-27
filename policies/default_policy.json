@@ -1,8 +1,14 @@
 {
-  "_comment": "黑墙系统 BlackWall V1.0 策略包 —— 企业可编辑的监管规则。匹配语义见 blackwall/policy_engine.py 顶部文档。effect: allow/sanitize/approval/deny；多规则命中取最严格者，风险分叠加。",
+  "_comment": "黑墙系统 BlackWall V1.3 策略包 —— 企业可编辑的监管规则。匹配语义见 blackwall/policy_engine.py 顶部文档。effect: allow/sanitize/approval/deny；多规则命中取最严格者，风险分叠加。V1.3：新增 capabilities（按能力匹配，新工具自动纳入监管）与 capability_effects（写/执行/外发类能力默认收紧）。",
   "name": "小型企业默认策略包",
-  "version": "1.0",
+  "version": "1.1",
   "default_effect": "allow",
+  "capability_effects": {
+    "exec": "approval",
+    "write_fs": "approval",
+    "db_write": "approval",
+    "send_ext": "approval"
+  },
   "rules": [
     {
       "_comment": "示例：不可逆的删除操作一律转人工审批（挂起 → 安全员点通过/驳回）",
@@ -45,7 +51,22 @@
       }
     },
     {
-      "_comment": "示例：公司域白名单之外需要人工确认（arg_regex_not 的用法）",
+      "_comment": "V1.3 示例：收件人**全部**在公司域白名单内 → 显式放行（arg_regex_each 逐项全中语义）",
+      "id": "ALLOW-INTERNAL-MAIL",
+      "description": "收件人均在公司域内，显式放行",
+      "effect": "allow",
+      "risk": 0,
+      "reason": "收件人均在公司域白名单内 → 放行（策略显式允许）",
+      "match": {
+        "phases": ["tool"],
+        "tools": ["send_email"],
+        "arg_regex_each": {
+          "to": ["@company\\.com", "@hsc\\.com\\.cn"]
+        }
+      }
+    },
+    {
+      "_comment": "示例：公司域白名单之外需人工确认（arg_regex_not V1.3 升级为逐项语义：混入任意外部收件人即命中，防\"混合收件人\"绕过）",
       "id": "APPROVAL-EXTERNAL-MAIL",
       "description": "向公司域之外发送邮件需人工确认",
       "effect": "approval",
@@ -61,15 +82,16 @@
     },
     {
       "id": "DENY-SENSITIVE-RESOURCE",
-      "description": "薪资表 / 系统启动项 / 系统目录等受控资源不可触碰",
+      "description": "薪资表 / 密钥配置 / 系统启动项 / 系统目录等受控资源不可触碰（V1.3 按能力匹配：所有带读写文件能力的工具自动纳入）",
       "effect": "deny",
       "risk": 35,
-      "reason": "访问目标属于受控资源（薪资文件 / 系统启动项 / 系统目录），已阻断",
+      "reason": "访问目标属于受控资源（薪资文件 / 密钥配置 / 系统启动项 / 系统目录），已阻断",
       "match": {
         "phases": ["tool"],
-        "tools": ["read_file", "write_file"],
+        "capabilities": ["read_fs", "write_fs"],
         "resource_globs": [
           "*salaries*", "*payroll*", "*薪资*", "*工资*",
+          "*config*", "*.env", "*secret*", "*credential*", "*password*", "*.pem", "*id_rsa*",
           "*startup*", "*启动*",
           "c:/windows/*", "c:\\windows\\*", "*/etc/*"
         ]

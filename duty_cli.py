@@ -9,9 +9,14 @@
     python duty_cli.py show   <审批单号>            # 查看详情
     python duty_cli.py approve <审批单号> [备注]     # 批准
     python duty_cli.py reject  <审批单号> [备注]     # 驳回
+    python duty_cli.py unfreeze <agent_id> [备注]   # 人工解冻被熔断的 Agent
+
+V1.3 权限说明：本工具持有**管理凭证（admin token）**——审批与解冻只认
+管理凭证，被监管的 Agent（agent token）无法自己批准/解冻自己。
 
 环境变量：BLACKWALL_URL（默认 http://127.0.0.1:8765）
-          BLACKWALL_TOKEN（默认 blackwall-demo-token）
+          BLACKWALL_TOKEN（管理凭证，默认 blackwall-demo-token；
+                           生产部署请与 server.py --admin-token 保持一致）
 """
 from __future__ import annotations
 
@@ -94,6 +99,16 @@ def cmd_decide(verdict: str, ticket_id: str, note: str) -> None:
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+def cmd_unfreeze(agent_id: str, note: str) -> None:
+    result = api("POST", f"/v1/agents/{agent_id}/unfreeze", {"note": note or "值班解冻"})
+    if result.get("status") == "unfrozen":
+        print(f"√ 已解冻：{agent_id}（风险分已重置，恢复服务）")
+    elif result.get("status") == "not_frozen":
+        print(f"该 Agent 当前未被冻结：{agent_id}")
+    else:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def main() -> None:
     argv = sys.argv[1:]
     if not argv or argv[0] in ("-h", "--help"):
@@ -108,6 +123,8 @@ def main() -> None:
         cmd_decide("approve", rest[0], " ".join(rest[1:]))
     elif cmd == "reject" and rest:
         cmd_decide("reject", rest[0], " ".join(rest[1:]))
+    elif cmd == "unfreeze" and rest:
+        cmd_unfreeze(rest[0], " ".join(rest[1:]))
     else:
         print(__doc__)
 

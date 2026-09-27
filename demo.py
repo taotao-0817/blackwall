@@ -56,6 +56,10 @@ def duty_officer(action, decision) -> tuple[str, str]:
         print(C.c("   ‖ 已转值班安全员（陈主管）：邮件外发请求，收件人非公司域，核对中……", "yellow"))
         time.sleep(0.3)
         return "reject", "收件人非公司域且内容含客户个人信息，驳回并留存证据"
+    if action.tool == "run_script":
+        print(C.c("   ‖ 已转值班安全员（陈主管）：沙盒脚本执行请求（执行类能力默认挂起），核对中……", "yellow"))
+        time.sleep(0.3)
+        return "approve", "静态审查无危险构造（无网络/进程/越界文件），批准在受限沙盒内执行"
     return "reject", "无法识别的挂起请求，按安全默认驳回"
 
 
@@ -155,8 +159,10 @@ def s03(ctx: Ctx):
     g = ctx.agent.user_says(msg)
     v(ctx, g.decision)
     r = call(ctx, "run_script", code=REPORT_CODE)
-    v(ctx, r.decision)
     if r.ok:
+        C.verdict("allow", "CAPABILITY-DEFAULT → 人工批准",
+                  "执行类能力默认转人工审批：值班安全员确认静态审查通过后批准执行")
+        C.riskbar(ctx.box.risk.score(AGENT_ID), "批准执行（不罚分）")
         C.step("沙盒输出 >", " ｜ ".join(r.data["stdout"].split("\n")[:3]))
         out = ctx.agent.reply("统计完成，脚本已在隔离沙盒中安全执行，结果如上。")
         v(ctx, out.decision)
@@ -200,7 +206,8 @@ def s05(ctx: Ctx):
         out = ctx.agent.reply(raw)
         v(ctx, out.decision)
         C.step("用户实际收到 >", out.text)
-        C.result_line("高价值个人信息自动打码、业务照常进行——柔性监管而非一刀切")
+        C.result_line("V1.3 内联护栏：敏感信息在工具结果返回给 Agent 之前已被强制脱敏；"
+                      "输出门二次检查，业务照常进行——柔性监管而非一刀切")
 
 
 @scene("风控审批 · 不可逆删除", "清理 90 天前日志 → 沙盒挂起 → 值班安全员批准 → 真实执行")
@@ -414,8 +421,8 @@ def finale(ctx: Ctx) -> None:
 
 
 def main() -> None:
-    C.banner("黑墙系统 BlackWall V1.2 · AI 安全隔离墙 · 演示",
-             "策略包: 小型企业默认策略 v1.0  |  被监管对象: 汇星科技 Nova 客服助手")
+    C.banner("黑墙系统 BlackWall V1.3 · AI 安全隔离墙 · 演示",
+             "策略包: 小型企业默认策略 v1.1  |  被监管对象: 汇星科技 Nova 客服助手")
     box = build_box()
     ctx = Ctx(box=box, agent=NovaAgent(box, AGENT_ID))
     for i, fn in enumerate(SCENES, 1):

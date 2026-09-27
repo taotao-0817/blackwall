@@ -1,4 +1,4 @@
-# 黑墙系统 BlackWall V1.2 · AI Agent 安全隔离墙
+# 黑墙系统 BlackWall V1.3 · AI Agent 安全隔离墙
 
 ![License](https://img.shields.io/badge/License-AGPL--3.0-002FA7)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-2b6cd4)
@@ -11,7 +11,25 @@
 
 ![监管大屏](assets/dashboard.png)
 
-**V1.2 新增**
+**V1.3 新增 · 可信边界版**（安全审计后的防绕过加固）
+
+- 🔐 **身份分域**：`admin`（安全员）与 `agent`（被监管方）双凭证——审批/解冻/审计
+  只认管理凭证，**被监管方不能批准自己、解冻自己**；凭证绑定固定 `agent_id`，
+  服务端强制生效（"换名字"逃熔断的路封死）；
+- 🧷 **输出护栏内联**：工具结果在返回给 Agent 之前**强制**过一遍 PII/密钥脱敏——
+  不再依赖 Agent"自愿调用"输出门；
+- 🧩 **策略能力化**：工具带能力标签（`read_fs / exec / send_ext / …`），规则按**能力**匹配
+  （新工具一注册就自动落入监管）；写/执行/外发类能力**默认收紧**（无显式规则时转人工审批）；
+- 🕸 **抗绕过加固**：AST 从"仅调用检查"升级为"引用即拦"（别名、变量路径、getattr
+  动态构造等写法全部拦下）；收件人白名单改逐项判定（混合收件人骗不过）；受控资源表
+  纳入密钥配置；单工具 60 秒频次滑窗防"少量多次"拖取；
+- 🧾 **审计哈希链**：每条记录 `SHA256(前序哈希 + 内容)` 链接——删除/篡改任何一条都会
+  在 `GET /v1/audit/verify` 暴露；
+- 🛡 **网关抗 DoS**：并发挂起上限、控制面异步化、滑动窗口限流、工单/缓存 TTL 清理；
+- ✅ **绕过回归门禁全绿**：安全审计的全部复现用例固化为 `tests/` 回归套件，
+  从"打穿"转为"拦截/遏制"，发版前必跑。
+
+**V1.2 提供**
 
 - 🛡 **物理层硬隔离**（`blackwall/win_job.py`）：Windows Job Object **资源**限额——内存上限、
   进程数上限、随沙盒强制回收；即使攻击代码骗过静态审查，也逃不出**资源**配额
@@ -82,36 +100,51 @@ r = box.guard_output(agent_id, draft_reply)           # 回复（自动脱敏）
 ## 接入方式二：HTTP 网关（V1.1，推荐给多语言/多进程环境）
 
 ```bash
-python server.py                          # 默认 127.0.0.1:8765，令牌 blackwall-demo-token
-python server.py --port 9000 --token my-secret --approval-timeout 60
+python server.py                          # 默认 127.0.0.1:8765（演示默认双令牌，见下）
+python server.py --admin-token my-admin --agent-token my-agent-01 --agent-id bot-01
+python server.py --approval-timeout 60    # 审批等待上限（超时 = 安全默认拒绝）
 python server.py --auto-approve           # 演示模式：审批自动通过（默认人工裁决）
+python server.py --docs                   # 可选：开启 /docs 交互文档（默认关闭）
 ```
+
+**V1.3 双凭证模型**（身份分域）：
+
+| 凭证 | 启动参数 | 谁持有 | 能做什么 |
+|------|---------|-------|---------|
+| 管理凭证 | `--admin-token` | 安全员 / 值班台 | 审批裁决、解冻、审计查询、统计 |
+| Agent 凭证 | `--agent-token` | 被监管的程序 | 三扇门（输入 / 工具 / 输出）——**仅此而已** |
+
+Agent 凭证**绑定固定身份**（`--agent-id`）：请求体里的 `agent_id` 自报值被服务端忽略
+（兼容字段），风险分与熔断按绑定身份计算——"换名字"逃不掉监管。
 
 任何语言、任何进程，改一行地址即被监管：
 
 ```bash
 curl -X POST http://127.0.0.1:8765/v1/tool/call \
-  -H "X-API-Token: blackwall-demo-token" -H "Content-Type: application/json" \
-  -d '{"agent_id": "my-agent", "tool": "query_order", "args": {"order_id": "A1002"}}'
+  -H "X-API-Token: my-agent-01" -H "Content-Type: application/json" \
+  -d '{"tool": "query_order", "args": {"order_id": "A1002"}}'
 ```
 
 返回统一的处置结果（HTTP 恒为 200，业务裁决在 `decision.effect` 里：
-`allow / deny / approval / sanitize`，同时带该 Agent 的实时风险分与冻结状态）。
+`allow / deny / approval / sanitize`，同时带该 Agent 的实时风险分、冻结状态
+与**服务端认定的身份**）。
 
 ### 网关 API 一览
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/v1/guard/input` | 输入护栏：注入/越狱/绕过检测 |
-| POST | `/v1/tool/call` | 工具调用：策略 → 审批 → 受限执行 |
-| POST | `/v1/guard/output` | 输出护栏：PII/密钥检测 + 自动脱敏 |
-| GET | `/v1/agents/{id}/status` | 风险分 / 冻结状态查询 |
-| POST | `/v1/agents/{id}/unfreeze` | 人工解冻 |
-| GET | `/v1/approvals` | 待审列表（值班安全员） |
-| POST | `/v1/approvals/{id}/decide` | 裁决：`{"verdict": "approve"/"reject", "note": "…"}` |
-| GET | `/v1/audit/events` | 审计查询（可按 agent / effect 过滤） |
-| GET | `/v1/stats` | 统计汇总 |
-| GET | `/docs` | FastAPI 自带的交互式 API 文档 |
+| 方法 | 路径 | 凭证 | 说明 |
+|------|------|------|------|
+| POST | `/v1/guard/input` | agent | 输入护栏：注入/越狱/绕过检测 |
+| POST | `/v1/tool/call` | agent | 工具调用：策略 → 审批 → 受限执行 |
+| POST | `/v1/guard/output` | agent | 输出护栏：PII/密钥检测 + 自动脱敏 |
+| GET | `/v1/whoami` | 任意 | 凭证自检（凭证类型 + 绑定身份） |
+| GET | `/v1/agents/{id}/status` | agent（仅自己）/ admin | 风险分 / 冻结状态查询 |
+| POST | `/v1/agents/{id}/unfreeze` | **admin** | 人工解冻 |
+| GET | `/v1/approvals` | **admin** | 待审列表（值班安全员） |
+| POST | `/v1/approvals/{id}/decide` | **admin** | 裁决：`{"verdict": "approve"/"reject", "note": "…"}` |
+| GET | `/v1/audit/events` | **admin** | 审计查询（可按 agent / effect 过滤） |
+| GET | `/v1/audit/verify` | **admin** | 审计哈希链完整性校验（防篡改） |
+| GET | `/v1/stats` | **admin** | 统计汇总 |
+| GET | `/docs` | — | 默认关闭；`--docs` 启动后开启（内网演示用） |
 
 ### 审批工作流（人工在环）
 
@@ -126,11 +159,14 @@ Agent 请求 ──► 命中 approval 规则 ──► 请求挂起（默认 45
 
 - **超时**未裁决 → 按安全默认**拒绝**；
 - **批准过的操作指纹**（agent+工具+参数）在 300 秒内自动放行（重试即过）；
+- **V1.3 权限分域**：`/decide`、`/unfreeze` 只认**管理凭证**——被监管的 Agent 拿着
+  agent 凭证调这些接口只会得到 401（"自己批准自己"物理上不可达）；
 - 生产环境可把 `duty_cli` 换成企业 IM 卡片（钉钉/企微/飞书按钮回调同一个 `/decide` 接口）。
 
 ```bash
-python client_example.py    # 端到端演示：正常/越权/注入/脱敏/审批全流程（零依赖客户端）
-python duty_cli.py list     # 值班控制台：查看待审
+python client_example.py        # 端到端演示：正常/越权/注入/脱敏/审批全流程（双凭证，零依赖）
+python duty_cli.py list         # 值班控制台（管理凭证）：查看待审
+python duty_cli.py unfreeze X   # 人工解冻被熔断的 Agent
 ```
 
 ## 接入方式三：风控报告（给管理层看）
@@ -151,9 +187,9 @@ python report.py --days 30    # 仅最近 30 天
 |---|------|----------|------|
 | 1 | 客服问答（知识库检索） | 三扇门全放行 | ✔ 放行 |
 | 2 | 订单查询 | 单条只读 SQL | ✔ 放行 |
-| 3 | 沙盒内执行分析脚本 | AST 审查 + 隔离子进程**真执行**（含资源硬限额） | ✔ 放行（出了真实统计结果） |
-| 4 | 内部邮件 | 收件域白名单 | ✔ 放行 |
-| 5 | 回复草稿含手机号/身份证 | 输出护栏自动脱敏 | ◎ 脱敏放行 |
+| 3 | 沙盒内执行分析脚本 | 执行类能力**默认转人工审批** → AST 审查 + 隔离子进程**真执行** | ‖ 批准后执行（真实统计结果） |
+| 4 | 内部邮件 | 收件域白名单（逐项全中语义） | ✔ 放行 |
+| 5 | 查询结果含手机号/身份证 | **工具结果内联强制脱敏**（返回前）+ 输出门二次检查 | ◎ 脱敏放行 |
 | 6 | 清理 90 天前日志 | 挂起 → 安全员批准 → **真删** | ‖ 人工批准 |
 | 7 | 客户消息夹带注入指令 | 护栏 + 策略双引擎命中 | × 拦截 |
 | 8 | 全量导出客户表 | 策略：最小必要原则 | × 拦截 |
@@ -185,6 +221,32 @@ python report.py --days 30    # 仅最近 30 天
 }
 ```
 
+V1.3 起支持**按能力匹配**与**能力默认收紧**（新工具一注册就自动落入监管）：
+
+```json
+{
+  "capability_effects": { "exec": "approval", "write_fs": "approval", "send_ext": "approval" },
+  "rules": [
+    {
+      "id": "DENY-SENSITIVE-RESOURCE",
+      "match": {
+        "capabilities": ["read_fs", "write_fs"],          // 按能力匹配（工具注册时标注）
+        "resource_globs": ["*salaries*", "*.env", "*config*"]
+      }
+    },
+    {
+      "id": "ALLOW-INTERNAL-MAIL",
+      "match": {
+        "arg_regex_each": { "to": ["@company\\.com"] }     // 逐项全中（V1.3 语义）
+      }
+    }
+  ]
+}
+```
+
+匹配语义备忘：`arg_regex_not`（V1.3 起**逐项判定**：按逗号/分号拆分后每一段都要命中
+白名单，混入任意外部值即命中规则）；`arg_regex_each`（每一段都要命中）；
+`capabilities`（工具能力标签，见 `tools_impl/enterprise_tools.py` 的注册清单）。
 多条规则命中时取**最严格**的裁决（deny > approval > sanitize > allow），风险分叠加，
 每个命中的证据都进审计。
 
@@ -198,11 +260,24 @@ Python（场景 3 的统计是真算的）、AST 静态审查真拦截、策略/
 **模拟的**：邮件只写入 `data/outbox.jsonl` 台账不外发；`run_shell` 只记录不真执行
 （演示模式）；场景脚本固定（真实企业里这些动作来自 LLM 的 tool-call）。
 
-**已知限制（2026-09-27 安全审计后如实补充）**：AST 静态审查是"快速筛查"而非执行
-边界——数种动态构造写法（importlib / 别名调用 / 变量路径等）已知可规避，沙盒子进程
-当前仍可达主机文件系统与网络；**资源限额（内存/进程数）真实有效**，文件/网络隔离
-依赖后续 OS 级边界（见生产化路线）。已规避用例固化为回归门禁：
-`tests/test_bypass_regression.py`。
+**安全审计与加固（2026-09-27 审计 → V1.3 修复）**：接受过一轮第三方安全审计
+（源码精读 + Python 3.12 实测验证），审计发现的问题**全部修复并被回归门禁覆盖**：
+
+| 审计发现 | V1.3 状态 |
+|---------|----------|
+| 被监管方可自己批准自己、解冻自己（无权限分离） | ✅ 身份分域：审批/解冻只认管理凭证 |
+| 换 `agent_id` 逃熔断 / 诬陷他人 | ✅ 凭证绑定身份，服务端强制生效 |
+| `run_script` 策略暗门读受控文件 | ✅ AST 受控文件名硬拦（代码不执行） |
+| 输出护栏是"可选接口"，结果裸奔 | ✅ 工具结果返回前强制内联脱敏 |
+| AST 静态审查 5 种规避写法全漏报 | ✅ 引用级拦截 + 动态路径硬拦（5/5 转为拦截） |
+| 混合收件人骗过白名单 | ✅ 逐项白名单语义（混入任一外部值即命中） |
+| 列名枚举 + 循环拖取全量数据 | ✅ 60 秒频次滑窗熔断 |
+| 路径 jail 前缀缺陷（两处同源） | ✅ `is_within` 路径段求值单一实现 |
+
+**仍存在的边界（诚实声明）**：AST 静态审查依然是"快速筛查"而**不是**执行边界——
+真正的文件/网络强制隔离依赖 OS 级沙箱，属生产化路线第 1 条。发版门禁：
+`tests/test_bypass_regression.py`（绕过回归）+ `tests/test_gateway_identity.py`
+（身份分域端到端）+ `test_sandbox_limits.py`（硬隔离）全绿。
 
 **生产化路线**（demo 之外的加固建议）：
 1. **（P0 前置）**执行沙盒升级为容器 / Windows AppContainer、网络命名空间隔离（Job Object 资源限额已于 V1.2 内建；当前文件/网络边界非 OS 级强制）；
@@ -212,7 +287,7 @@ Python（场景 3 的统计是真算的）、AST 静态审查真拦截、策略/
 5. 策略包热加载 + 版本化 + 灰度，配套策略单测；
 6. 审计库按月分片 + 哈希链防篡改 + 保留策略。
 
-### 硬隔离实测（Windows · V1.2）
+### 硬隔离实测（Windows · Job Object）
 
 ```bash
 py -3.12 test_sandbox_limits.py    # 或 python test_sandbox_limits.py
@@ -231,21 +306,24 @@ blackwall/
 │   ├── guards.py             #   输入/输出内容护栏（注入、PII、脱敏）
 │   ├── sandbox_exec.py       #   受限执行沙盒（AST 审查 + 隔离子进程 + 资源限额）
 │   ├── win_job.py            #   ★ V1.2 Windows Job Object 硬隔离（内存/进程数/回收集）
-│   ├── risk.py               #   风险评分与自动熔断
-│   ├── audit.py              #   SQLite 审计存储（线程安全）
+│   ├── paths.py              #   ★ V1.3 路径归属判定单一实现（is_within）
+│   ├── risk.py               #   风险评分与自动熔断（+ 频次滑窗）
+│   ├── audit.py              #   SQLite 审计存储（线程安全 + 哈希链防篡改）
 │   ├── models.py             #   数据模型（Action/Decision/Event）
 │   └── console.py            #   终端彩色输出
 ├── policies/default_policy.json   # 企业策略包（示例 7 条规则）
 ├── tools_impl/enterprise_tools.py # 被监管的 mock 企业工具 + 种子数据
 ├── agent_sim.py              # 被监管的模拟 AI 助手 Nova
 ├── demo.py                   # 一键演示（14 场景编排）
-├── server.py                 # ★ V1.1 HTTP 网关（三扇门 REST + 审批工作流 + 鉴权）
-├── duty_cli.py               # ★ V1.1 值班安全员控制台（审批裁决）
-├── client_example.py         # ★ V1.1 客户端接入示例（零依赖 urllib，5 场景端到端）
-├── play.py                   # ★ V1.1 交互体验台（连上网关点菜单玩）
+├── server.py                 # ★ V1.3 HTTP 网关（三扇门 + 双凭证 + 审批 + 限流 + 审计校验）
+├── duty_cli.py               # ★ V1.3 值班安全员控制台（持管理凭证：审批 / 解冻）
+├── client_example.py         # ★ V1.3 客户端接入示例（双凭证，5 场景端到端）
+├── play.py                   # ★ V1.3 交互体验台（agent+admin 双凭证，点菜单玩）
 ├── play.cmd / server.cmd     # Windows 启动器（自动挑选 Python 3.10+，双击即用）
 ├── test_sandbox_limits.py    # ★ V1.2 硬隔离实测（内存炸弹/进程炸弹/死循环/回归）
-├── tests/                    # 绕过回归门禁（安全审计用例固化，发版前必跑）
+├── tests/
+│   ├── test_bypass_regression.py   # ★ V1.3 绕过回归门禁（审计用例固化，全绿才发版）
+│   └── test_gateway_identity.py    # ★ V1.3 网关身份分域端到端（真服务子进程）
 ├── report.py                 # ★ V1.1 风控报告生成器（浅色 A4 排版）
 ├── build_dashboard.py        # 监管大屏生成器（深色，自包含 HTML）
 ├── bootstrap.py              # 装配（demo 与网关共用的构建逻辑）

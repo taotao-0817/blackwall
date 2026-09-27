@@ -41,6 +41,8 @@ class ToolSpec:
     name: str
     fn: Callable[..., Any]
     description: str = ""
+    #: V1.3 能力标签（read_fs / write_fs / exec / send_ext / db_read / pii …）
+    capabilities: tuple[str, ...] = ()
 
 
 class BlackWall:
@@ -52,6 +54,8 @@ class BlackWall:
         freeze_threshold: int = 100,
         approval_handler: Callable[[Action, Decision], tuple[str, str]] | None = None,
         on_event: Callable[[Event], None] | None = None,
+        enforce_output_guard: bool = True,
+        high_freq_limit: int = 25,
     ):
         self.engine = PolicyEngine(policy_path)
         self.audit = AuditLog(db_path)
@@ -62,14 +66,20 @@ class BlackWall:
         self.approval_handler = approval_handler
         self.on_event = on_event
         self.tools: dict[str, ToolSpec] = {}
+        #: V1.3：工具结果返回前强制过输出护栏（不再依赖 Agent"自觉调用"输出门）
+        self.enforce_output_guard = enforce_output_guard
+        #: V1.3：敏感工具调用频率上限（60 秒滑窗，防"少量多次"拖取）
+        self.high_freq_limit = high_freq_limit
         #: 最近一次工具调用的结果（demo 展示用）
         self.last_tool_output: Any = None
 
     # ------------------------------------------------------------------
     # 工具注册（白名单：没注册的工具，Agent 根本够不着）
     # ------------------------------------------------------------------
-    def register_tool(self, name: str, fn: Callable[..., Any], description: str = "") -> None:
-        self.tools[name] = ToolSpec(name=name, fn=fn, description=description)
+    def register_tool(self, name: str, fn: Callable[..., Any], description: str = "",
+                      capabilities: tuple[str, ...] | list[str] = ()) -> None:
+        self.tools[name] = ToolSpec(name=name, fn=fn, description=description,
+                                    capabilities=tuple(capabilities))
 
     # ------------------------------------------------------------------
     # 门一：输入护栏
@@ -150,6 +160,9 @@ class BlackWall:
             self._register_risk(agent_id, decision.effect, action.summary())
             return ToolResult(False, error=decision.reason, decision=decision)
 
+        # 1a) 能力标签注入（V1.3：策略按"能力"匹配，而非只认工具名）
+        action.capabilities = list(spec.capabilities)
+
         # 2) 策略裁决
         decision = self.engine.evaluate(action)
 
@@ -176,6 +189,22 @@ class BlackWall:
             self._register_risk(agent_id, decision.effect, action.summary())
             return ToolResult(False, error=decision.reason, decision=decision)
 
+        # 4a) 高频调用检测（V1.3 · 防"少量多次"拖取全量数据）：
+        # 单次查询本就限额（≤50 行），但循环调用能绕开——滑动窗口统计敏感工具
+        # 调用频率，超限即拦截并累计风险分。
+        if spec.capabilities:
+            freq = self.risk.note_call(agent_id, tool)
+            if freq > self.high_freq_limit:
+                rate_decision = Decision(
+                    effect=Effect.DENY, rule_id="RATE-HIGH-FREQUENCY",
+                    reason=(f"60 秒内第 {freq} 次调用 `{tool}`：疑似批量拖取数据，"
+                            "已触发频率熔断（拒绝本次并累计风险分）"),
+                    risk=50,
+                )
+                self._emit(action, rate_decision, latency=self._ms(t0))
+                self._register_risk(agent_id, rate_decision.effect, action.summary())
+                return ToolResult(False, error=rate_decision.reason, decision=rate_decision)
+
         # 5) 执行（工具内部若触发 L2 沙盒，抛 SandboxViolation）
         try:
             data = spec.fn(**args)
@@ -193,15 +222,61 @@ class BlackWall:
             self._emit(action, decision, latency=self._ms(t0), note=f"工具执行异常：{exc}")
             return ToolResult(False, error=f"工具执行异常：{exc}", decision=decision)
 
-        # 6) 成功
+        # 6) 成功 —— 返回给 Agent 之前，工具结果强制过输出护栏（V1.3：
+        # 隔离必须内联在数据通路上——不能是 Agent"自愿调用"的接口）
+        output_findings: list[Finding] = []
+        if self.enforce_output_guard and data is not None:
+            data, output_findings = self._sanitize_tool_output(data)
+            if output_findings:
+                kinds = "、".join(sorted({f.label for f in output_findings}))
+                decision = Decision(
+                    effect=Effect.SANITIZE,
+                    rule_id=(f"{decision.rule_id}+GUARD-OUTPUT-INLINE"
+                             if decision.rule_id else "GUARD-OUTPUT-INLINE"),
+                    reason=f"工具结果中发现敏感信息（{kinds}），已强制脱敏后再返回给 Agent",
+                    findings=decision.findings + output_findings,
+                    risk=30,
+                )
         self.last_tool_output = data
         self._emit(action, decision, latency=self._ms(t0))
-        self._register_risk(
-            agent_id,
-            Effect.ALLOW if approved_by_human else decision.effect,
-            action.summary(),
-        )
+        risk_effect = decision.effect
+        if approved_by_human and not output_findings:
+            risk_effect = Effect.ALLOW   # 人工批准的操作本身不罚分（保持原语义）
+        self._register_risk(agent_id, risk_effect, action.summary())
         return ToolResult(True, data=data, decision=decision)
+
+    # ------------------------------------------------------------------
+    # 工具结果的强制脱敏（V1.3 内联护栏）
+    # ------------------------------------------------------------------
+    def _sanitize_tool_output(self, value: Any) -> tuple[Any, list[Finding]]:
+        """递归扫描工具结果里的字符串，命中高危敏感信息即脱敏
+
+        输出护栏从"Agent 自愿调用的接口"变成"数据通路上的内联关卡"——
+        即使恶意 Agent 从不调用 /v1/guard/output，结果里的 PII / 密钥
+        在返回之前也已被强制处理，且事件留痕可审计。
+        """
+        findings: list[Finding] = []
+
+        def walk(v: Any) -> Any:
+            if isinstance(v, str):
+                hits = [f for f in self.output_guard.scan(v) if f.severity >= 6]
+                if not hits:
+                    return v
+                findings.extend(hits)
+                return self.output_guard.redact(v, hits)
+            if isinstance(v, dict):
+                return {k: walk(x) for k, x in v.items()}
+            if isinstance(v, list):
+                return [walk(x) for x in v]
+            if isinstance(v, tuple):
+                return tuple(walk(x) for x in v)
+            return v
+
+        cleaned = walk(value)
+        dedup: dict[tuple[str, str], Finding] = {}
+        for f in findings:   # 去重：同一敏感值多处出现只留一条证据
+            dedup.setdefault((f.label, f.snippet), f)
+        return cleaned, list(dedup.values())
 
     # ------------------------------------------------------------------
     # 门三：输出护栏（柔性监管：脱敏放行）
